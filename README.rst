@@ -14,7 +14,7 @@ The builds are provided for several platforms:
 Features
 --------
 
-Currently FFmpeg 5.1.2 is used with the following features enabled for all platforms:
+Currently FFmpeg 6.1.1 is used with the following features enabled for all platforms:
 
 - fontconfig
 - gmp
