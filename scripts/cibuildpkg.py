@@ -1,5 +1,7 @@
 # Utilities for building native library inside cibuildwheel
 
+from __future__ import annotations
+
 import contextlib
 import os
 import platform
@@ -10,18 +12,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-
-
-def log_print(msg: str) -> None:
-    sys.stdout.write(msg + "\n")
-    sys.stdout.flush()
-
-
-def run(cmd: list[str], env: dict[str, str] | None = None) -> None:
-    log_print(f"- Running: {cmd}")
-    subprocess.run(cmd, check=True, env=env)
 
 
 def fetch(url: str, path: str) -> None:
@@ -37,9 +28,6 @@ def get_platform() -> str:
     if system == "Linux":
         return f"manylinux_{machine}"
     elif system == "Darwin":
-        # cibuildwheel sets ARCHFLAGS:
-        # https://github.com/pypa/cibuildwheel/blob/5255155bc57eb6224354356df648dc42e31a0028/cibuildwheel/macos.py#L207-L220
-        machine = os.environ["ARCHFLAGS"].split()[1]
         return f"macosx_{machine}"
     elif system == "Windows":
         if struct.calcsize("P") * 8 == 64:
@@ -51,7 +39,7 @@ def get_platform() -> str:
 
 
 @contextlib.contextmanager
-def chdir(path: str) -> Iterator[None]:
+def chdir(path):
     """
     Changes to a directory and returns to the original directory at exit.
     """
@@ -64,7 +52,7 @@ def chdir(path: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def log_group(title: str) -> Iterator[None]:
+def log_group(title):
     """
     Starts a log group and ends it at exit.
     """
@@ -83,6 +71,11 @@ def log_group(title: str) -> Iterator[None]:
         log_print(f"{start_color}{outcome}{end_color} {duration:.2f}s".rjust(78))
 
 
+def log_print(msg: str) -> None:
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+
 def make_args(*, parallel: bool) -> list[str]:
     """
     Arguments for GNU make.
@@ -96,7 +89,7 @@ def make_args(*, parallel: bool) -> list[str]:
     return args
 
 
-def prepend_env(env: dict[str, str], name: str, new: str, separator: str = " ") -> None:
+def prepend_env(env, name, new, separator=" "):
     old = env.get(name)
     if old:
         env[name] = new + separator + old
@@ -104,7 +97,12 @@ def prepend_env(env: dict[str, str], name: str, new: str, separator: str = " ") 
         env[name] = new
 
 
-@dataclass(slots=True)
+def run(cmd, env=None):
+    log_print(f"- Running: {cmd}")
+    subprocess.run(cmd, check=True, env=env)
+
+
+@dataclass
 class Package:
     name: str
     source_url: str
@@ -112,16 +110,18 @@ class Package:
     build_arguments: list[str] = field(default_factory=list)
     build_dir: str = "build"
     build_parallel: bool = True
-    requires: list[str] = field(default_factory=list)  # for docs only
-    fflags: str = ""
+    requires: list[str] = field(default_factory=list)
     source_dir: str = ""
     source_filename: str = ""
     source_strip_components: int = 1
-    gpl: bool = False  # As opposed to the LGPL or other license.
+    gpl: bool = False
+
+    def __lt__(self, other):
+        return self.name < other.name
 
 
 class Builder:
-    def __init__(self, dest_dir: str):
+    def __init__(self, dest_dir: str) -> None:
         self._builder_dest_dir = dest_dir + ".builder"
         self._target_dest_dir = dest_dir
 
@@ -129,7 +129,7 @@ class Builder:
         self.patch_dir = os.path.abspath("patches")
         self.source_dir = os.path.abspath("source")
 
-    def build(self, package: Package, *, for_builder: bool = False) -> None:
+    def build(self, package: Package, *, for_builder: bool = False):
         # if the package is already installed, do nothing
         installed_dir = os.path.join(
             self._prefix(for_builder=for_builder), "var", "lib", "cibuildpkg"
@@ -139,6 +139,7 @@ class Builder:
             return
 
         with log_group(f"build {package.name}"):
+            self._extract(package)
             if package.name == "x265":
                 self._build_x265(package, for_builder=for_builder)
             elif package.build_system == "cmake":
@@ -165,7 +166,7 @@ class Builder:
             shutil.rmtree(self.build_dir)
 
         # create directories
-        for d in (self.build_dir, self.source_dir):
+        for d in [self.build_dir, self.source_dir]:
             os.makedirs(d, exist_ok=True)
 
         # add tools to PATH
@@ -173,7 +174,7 @@ class Builder:
             os.environ,
             "PATH",
             os.path.join(self._builder_dest_dir, "bin"),
-            separator=";" if platform.system() == "Windows" else ":",
+            separator=os.pathsep,
         )
 
     def _build_with_autoconf(self, package: Package, for_builder: bool) -> None:
@@ -205,34 +206,18 @@ class Builder:
             "--libdir=" + self._mangle_path(os.path.join(prefix, "lib")),
             "--prefix=" + self._mangle_path(prefix),
         ]
-        darwin_arm64_cross = (
-            platform.system() == "Darwin"
-            and not for_builder
-            and os.environ["ARCHFLAGS"] == "-arch arm64"
-        )
 
         if package.name == "vpx":
-            if darwin_arm64_cross:
-                # darwin20 is the first darwin that supports arm64 macs
-                configure_args += ["--target=arm64-darwin20-gcc"]
-            elif platform.system() == "Darwin":
-                # darwin13 matches the macos 10.9 target used by cibuildwheel:
-                # https://cibuildwheel.readthedocs.io/en/stable/cpp_standards/#macos-and-deployment-target-versions
-                configure_args += ["--target=x86_64-darwin13-gcc"]
+            if platform.system() == "Darwin":
+                if platform.machine() == "arm64":
+                    # darwin20 is the first darwin that supports arm64 macs
+                    configure_args += ["--target=arm64-darwin20-gcc"]
+                elif platform.machine() == "x86_64":
+                    # darwin13 matches the macos 10.9 target used by cibuildwheel:
+                    # https://cibuildwheel.readthedocs.io/en/stable/cpp_standards/#macos-and-deployment-target-versions
+                    configure_args += ["--target=x86_64-darwin13-gcc"]
             elif platform.system() == "Windows":
                 configure_args += ["--target=x86_64-win64-gcc"]
-        elif darwin_arm64_cross:
-            # AC_FUNC_MALLOC and AC_FUNC_REALLOC fail when cross-compiling
-            env["ac_cv_func_malloc_0_nonnull"] = "yes"
-            env["ac_cv_func_realloc_0_nonnull"] = "yes"
-
-            if package.name == "ffmpeg":
-                configure_args += ["--arch=arm64", "--enable-cross-compile"]
-            else:
-                configure_args += [
-                    "--build=x86_64-apple-darwin",
-                    "--host=aarch64-apple-darwin",
-                ]
 
         # build package
         os.makedirs(package_build_path, exist_ok=True)
@@ -268,12 +253,6 @@ class Builder:
         ]
         if platform.system() == "Darwin":
             cmake_args.append("-DCMAKE_INSTALL_NAME_DIR=" + os.path.join(prefix, "lib"))
-            if not for_builder and os.environ["ARCHFLAGS"] == "-arch arm64":
-                cmake_args += [
-                    "-DCMAKE_OSX_ARCHITECTURES=arm64",
-                    "-DCMAKE_SYSTEM_NAME=Darwin",
-                    "-DCMAKE_SYSTEM_PROCESSOR=arm64",
-                ]
 
         # build package
         os.makedirs(package_build_path, exist_ok=True)
@@ -299,26 +278,6 @@ class Builder:
         env = self._environment(for_builder=for_builder)
         prefix = self._prefix(for_builder=for_builder)
         meson_args = ["--libdir=lib", "--prefix=" + prefix]
-        if (
-            platform.system() == "Darwin"
-            and not for_builder
-            and os.environ["ARCHFLAGS"] == "-arch arm64"
-        ):
-            cross_file = os.path.join(package_path, "meson.cross")
-            with open(cross_file, "w") as fp:
-                fp.write(
-                    """[binaries]
-c = 'cc'
-cpp = 'c++'
-
-[host_machine]
-system = 'darwin'
-cpu_family = 'aarch64'
-cpu = 'aarch64'
-endian = 'little'
-"""
-                )
-            meson_args.append("--cross-file=" + cross_file)
 
         # build package
         os.makedirs(package_build_path, exist_ok=True)
@@ -395,16 +354,7 @@ endian = 'little'
         ]
         self._build_with_cmake(package=package, for_builder=for_builder)
 
-    def extract(self, package: Package, for_builder: bool = False) -> None:
-        # ifthe package is already installed, do nothing
-        installed_dir = os.path.join(
-            self._prefix(for_builder=for_builder), "var", "lib", "cibuildpkg"
-        )
-        installed_file = os.path.join(installed_dir, package.name)
-        if os.path.exists(installed_file):
-            return
-
-
+    def _extract(self, package: Package) -> None:
         assert package.source_strip_components in (
             0,
             1,
@@ -462,20 +412,17 @@ endian = 'little'
 
         if platform.system() == "Darwin" and not for_builder:
             arch_flags = os.environ["ARCHFLAGS"]
-            if arch_flags == "-arch arm64":
-                prepend_env(env, "ASFLAGS", arch_flags)
-            for var in ("CFLAGS", "CXXFLAGS", "LDFLAGS"):
+            for var in ["CFLAGS", "CXXFLAGS", "LDFLAGS"]:
                 prepend_env(env, var, arch_flags)
 
         return env
 
     def _mangle_path(self, path: str) -> str:
         if platform.system() == "Windows":
-            return (
-                path.replace(os.path.sep, "/").replace("C:", "/c").replace("D:", "/d")
-            )
-        else:
-            return path
+            path = path.replace(os.path.sep, "/")
+            if path[1] == ':':
+                path = f"/{path[0].lower()}{path[2:]}"
+        return path
 
     def _prefix(self, *, for_builder: bool) -> str:
         if for_builder:

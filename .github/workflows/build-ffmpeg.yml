@@ -1,15 +1,30 @@
 name: build-ffmpeg
-on: [push, pull_request]
+on:
+  push:
+    branches: main
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+      - '**.txt'
+  pull_request:
+    branches: main
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+      - '**.txt'
+  release:
+    types: [published]
 jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-14
             arch: arm64
             shell: bash
-          - os: macos-latest
+          - os: macos-13
             arch: x86_64
             shell: bash
           - os: ubuntu-latest
@@ -26,15 +41,15 @@ jobs:
         shell: ${{ matrix.shell }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: 3.12
+          python-version: "3.9"
       - name: Install packages
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-13' || matrix.os == 'macos-14'
         run: |
           brew update
           brew install pkg-config
-          brew unlink gettext libidn2 libpng libtiff libunistring little-cms2 unbound
+          brew unlink gettext libidn2 libpng libtiff libunistring libx11 libxau libxcb libxdmcp little-cms2 unbound
       - uses: msys2/setup-msys2@v2
         if: matrix.os == 'windows-latest'
         with:
@@ -45,19 +60,17 @@ jobs:
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_BEFORE_BUILD: python scripts/build-ffmpeg.py /tmp/vendor --disable-gpl
           CIBW_BEFORE_BUILD_WINDOWS: python scripts\build-ffmpeg.py C:\cibw\vendor --disable-gpl
-          CIBW_BUILD: cp312-*
+          CIBW_BUILD: cp39-*
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: LD_LIBRARY_PATH=/tmp/vendor/lib:$LD_LIBRARY_PATH auditwheel repair -w {dest_dir} {wheel}
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: delvewheel repair --add-path C:\cibw\vendor\bin -w {dest_dir} {wheel}
           CIBW_SKIP: "*musllinux*"
-
           CIBW_TEST_COMMAND: python -c "import dummy"
         run: |
           pip install cibuildwheel delvewheel
           cibuildwheel --output-dir output
           rm -f output/*.whl
-
       - name: Upload FFmpeg
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
         with:
-          files: output/*
+          name: output-${{ matrix.os }}-${{ matrix.arch }}
+          path: output/
